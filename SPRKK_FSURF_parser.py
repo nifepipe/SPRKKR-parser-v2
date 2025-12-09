@@ -1,3 +1,10 @@
+"""
+Imports and processes data from SPRKKR outputs for FSURF calculations
+Extracts and plots a cut through the Fermi Surface calculated with SPR-KKR and XBAND
+
+Author: David Redka
+Date: 2025.01.01
+"""
 import tkinter as tk
 from tkinter import filedialog
 from pathlib import Path
