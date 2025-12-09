@@ -1,6 +1,6 @@
 """
-Imports and processes data from SPRKKR outputs for EOS calculations
-Fits the Birch-Murnaghan equation of state and exports the results
+Imports and processes data from SPRKKR outputs for BSF calculations
+Extracs Bloch Spectral Function from .gnu file generated with SPR-KKR and XBAND
 
 Author: David Redka, Nicolas Piwek
 Date: 2025.12.09
