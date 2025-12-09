@@ -1,3 +1,10 @@
+"""
+Imports and processes data from SPRKKR outputs for EOS calculations
+Fits the Birch-Murnaghan equation of state and exports the results
+
+Author: David Redka, Nicolas Piwek
+Date: 2025.12.09
+"""
 import numpy as np
 import matplotlib.pyplot as plt
 import os
