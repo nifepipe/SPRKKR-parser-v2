@@ -10,13 +10,22 @@ from tkinter import filedialog
 import matplotlib.pyplot as plt
 from pathlib import Path
 from collections import defaultdict
+import re
+import pandas as pd
 
 #CONSTANTS
 # Map orbital quantum numbers to their respective labels (s, p, d, etc.)
 BANDS = {1: 's', 2: 'p', 3: 'd', 4: 'f', 5: 'g', 6: 'h', 7: 'i'}
+DEFAULT_COMB=True
+# Adjust these limits to zoom in/out of your plot by default
+XLIM = (-10, 5)   # Energy range (eV)
+TITLE_FONT_SIZE = 12
+LABEL_FONT_SIZE = 10
+
+# Your preferred colors
+COLORS = ['k', 'r', 'b', 'g', 'm', 'c', 'orange', 'purple', 'brown', 'gray']
 
 #SPRKKR_DOS_parser.py
-
 def file_select()->str:
     root = tk.Tk()
     root.withdraw()
@@ -394,6 +403,7 @@ def save_parsed(data, fname, HEADER, opt_conc, opt_unit)->None:
         comments=""            # Ensure no "#" is prepended to the header (default behavior of savetxt)
     )
     print(f"Exported data_parsed to {fname_bands}")
+    return fname_bands
 
 def save_tot(data_tot, fname, HEADER_tot, opt_conc, opt_unit)->None:
     # Export data into an dat file
@@ -414,9 +424,311 @@ def save_tot(data_tot, fname, HEADER_tot, opt_conc, opt_unit)->None:
         comments=""            # Ensure no "#" is prepended to the header
     )
     print(f"Exported data_tot to {fname_tot}")
+    return fname_tot
+
+
 
 #SPRKKR_DOS_export.py
 
+# Function to query yes/no from the user
+def get_user_choice(prompt):
+    while True:
+        choice = input(f"{prompt} (y/n): ").strip().lower()
+        if choice in ['y', 'n', ""]:
+            return choice == 'y' or choice == ""
+        print("Invalid input! Please enter only 'y' or 'n'.")
+
+def sort_dos_data_from_file(fname, 
+                            pattern = re.compile(r'([A-Za-z]+)(?:_([0-9]+))?\s+([spdf])\s+(up|dn)'),
+                            default=False):
+    # Extract header line
+    with open(fname, 'r', encoding='utf-8') as f:
+        header_line = f.readline().strip()
+
+    # Convert header to list (comma-separated)
+    header = np.array(header_line.split(','))
+
+    # Structure: Sites -> Elements -> Orbitals -> Spins -> Columns
+    column_map = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: {'up': [], 'dn': []})))
+
+    # Parse header and assign columns. Default site is "1" if missing.
+    for i, col in enumerate(header):
+        match = pattern.match(col)
+        if match:
+            element, site, orbital, spin = match.groups()
+            if site is None:
+                site = "1"
+            column_map[site][element][orbital][spin].append(i)
+    
+    # Ask which categories to combine
+    if default == True: 
+        combine_sites = False
+        combine_elements = False
+        combine_orbitals = False
+        combine_spin = False
+    else: 
+        combine_sites = get_user_choice("Combine sites?")
+        combine_elements = get_user_choice("Combine elements?")
+        combine_orbitals = get_user_choice("Combine orbitals?")
+        combine_spin = get_user_choice("Combine spin?")
+    
+    # Load numerical data (skip header)
+    data = np.genfromtxt(fname, delimiter=",", skip_header=1)
+
+    desired_energy=None
+
+    if default == True:
+        # Additional energy selection: use all energies or pick the closest row.
+        include_all_energies = True #get_user_choice("Include all energies?")
+    else:
+        include_all_energies = get_user_choice("Include all energies?")
+
+    if not include_all_energies:
+        while True:
+            try:
+                desired_energy = float(input("Enter desired energy value: "))
+                break
+            except ValueError:
+                print("Invalid input! Please enter a valid numerical value.")
+        energy_values = data[:, 0]
+        idx = np.argmin(np.abs(energy_values - desired_energy))
+        print(f"Closest energy found: {energy_values[idx]} eV")
+        data = data[idx:idx+1, :]
+    
+    # Determine DOS columns to sum based on user choices.
+    summed_dos = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: np.zeros(data.shape[0]))))
+
+    for site, elements in column_map.items():
+        site_key = "All Sites" if combine_sites else f"Site {site}"
+        for element, orbitals in elements.items():
+            element_key = "All Elements" if combine_elements else element
+            for orbital, spins in orbitals.items():
+                orbital_key = "All Orbitals" if combine_orbitals else orbital
+                if combine_spin:
+                    indices = [idx for spin_list in spins.values() for idx in spin_list]
+                    if indices:
+                        summed_dos[site_key][element_key][orbital_key] += np.sum(data[:, indices], axis=1)
+                else:
+                    for spin, indices in spins.items():
+                        if indices:
+                            key = orbital_key + ' ' + spin
+                            summed_dos[site_key][element_key][key] += np.sum(data[:, indices], axis=1)
+    return data, summed_dos, desired_energy, combine_sites, combine_elements, combine_orbitals, combine_spin, include_all_energies
+
+# Transformation functions for header components
+def transform_site(site):
+    # Replace "Site X" with "AX" or "All Sites" with "all sites"
+    if site.startswith("Site "):
+        parts = site.split()
+        if len(parts) == 2:
+            return "A" + parts[1]
+    elif site == "All Sites":
+        return "all sites"
+    return site
+
+def transform_element(element):
+    # Replace "All Elements" with "all elements"
+    return "all elements" if element == "All Elements" else element
+
+def transform_orbital(orbital):
+    # Replace "All Orbitals" with "all orbitals"
+    return "all orbitals" if orbital == "All Orbitals" else orbital
+
+def build_datastruct(data, summed_dos, desired_energy, fname, combine_sites, combine_elements, combine_orbitals, combine_spin, include_all_energies):
+    # Create output array and header.
+    # Energy column header is replaced with "E"
+    energy = data[:, 0]
+    output_data = [energy]
+    output_header = ["E"]
+
+    # Build header for each DOS column from the nested dictionary.
+    for site_key, elements in summed_dos.items():
+        t_site = transform_site(site_key)
+        for element_key, orbitals in elements.items():
+            t_element = transform_element(element_key)
+            for orbital_key, dos_values in orbitals.items():
+                parts = orbital_key.split()
+                if len(parts) == 2:
+                    t_orbital = transform_orbital(parts[0])
+                    t_spin = parts[1]  # spin remains unchanged
+                    header_string = f"{t_site} {t_element} {t_orbital} {t_spin}"
+                else:
+                    t_orbital = transform_orbital(orbital_key)
+                    header_string = f"{t_site} {t_element} {t_orbital}"
+                output_header.append(header_string)
+                output_data.append(dos_values)
+
+    # Stack and save output; the header is comma-joined.
+    output_array = np.column_stack(output_data)
+    output_filename = fname + "_export_final.dat"
+    np.savetxt(output_filename, output_array, delimiter=",", header=",".join(output_header), comments='')
+
+    # Output summary
+    print("\nSummary Mode:")
+    print(f"  Sites: {'Yes' if combine_sites else 'No'}")
+    print(f"  Elements: {'Yes' if combine_elements else 'No'}")
+    print(f"  Orbitals: {'Yes' if combine_orbitals else 'No'}")
+    print(f"  Spin: {'Yes' if combine_spin else 'No'}")
+    print(f"  Energy selection: {'All energies' if include_all_energies else f'Closest to {desired_energy} eV'}")
+    print(f"\nSummed DOS saved to '{output_filename}'")
+    return output_filename
+
+#SPRKKR_DOS_plotter.py
+def convert_to_pandas(filepath, default=False):
+    if default:
+        df=pd.read_csv(filepath)
+        return df
+    else:
+        print("Default settings are of. This may break the plotter...")
+        root = tk.Tk()
+        root.withdraw()
+        fname = filedialog.askopenfilename(
+        title="Select SPR-KKR Exported DAT file",
+        filetypes=[("DAT files", "*.dat"), ("All files", "*.*")]
+        )
+        df=pd.read_csv(fname)
+        if not fname:
+            print("No file selected.")
+            exit()
+    return df
+
+def analyze_headers(columns):
+    """
+    Scans the file headers to find what Sites (A1..), Elements (Fe..), 
+    and Orbitals (s,p..) are present.
+    """
+    metadata = {
+        "sites": set(),
+        "elements": set(),
+        "orbitals": set(),
+        "spins": set()
+    }
+    
+    # Regex to capture: "Site Element Orbital [Spin]"
+    # Matches: "A1 Fe d up"  OR  "A1 Fe d"
+    pattern = re.compile(r"(\S+)\s+(\S+)\s+(\S+)(?:\s+(up|dn))?")
+
+    for col in columns:
+        if col.strip() == "E": continue
+        
+        match = pattern.search(col)
+        if match:
+            site, elem, orb, spin = match.groups()
+            metadata["sites"].add(site)
+            metadata["elements"].add(elem)
+            metadata["orbitals"].add(orb)
+            if spin: metadata["spins"].add(spin)
+            
+    # Sort them so A1, A2, A3 appear in order
+    meta = {k: sorted(list(v)) for k, v in metadata.items()}
+
+    print("\n--- Detected in file ---")
+    print(f" Sites:    {', '.join(meta['sites'])}")
+    print(f" Elements: {', '.join(meta['elements'])}")
+    print(f" Orbitals: {', '.join(meta['orbitals'])}")
+    print("------------------------")
+
+    return meta
+
+def compute_group_dos(df, unique_items):
+    """
+    Sum columns based on a list of keywords. 
+    Example: if unique_items=['A1', 'A2'], it creates 'PDOS A1' and 'PDOS A2'.
+    """
+    computed_df = pd.DataFrame()
+    
+    for item in unique_items:
+        # Find all columns containing this keyword (e.g. "A1")
+        # We split by space to ensure "s" doesn't match "spin"
+        cols_to_sum = [c for c in df.columns if c != "E" and item in c.split()]
+        
+        if cols_to_sum:
+            col_name = f"PDOS {item}"
+            computed_df[col_name] = df[cols_to_sum].sum(axis=1)
+            print(f"  > Created '{col_name}' (sum of {len(cols_to_sum)} columns)")
+            
+    return computed_df
+
+def process_pandas(df_raw, meta):
+    df_plot=pd.DataFrame()
+    df_plot["E"]=df_raw["E"]
+
+    data_cols = [c for c in df_raw.columns if c != "E"]
+    df_plot["Total DOS"] = df_raw[data_cols].sum(axis=1)
+
+    print("\nWhat do you want to compare?")
+    print("1. Nothing (Total DOS only)")
+    menu = {"1": "total"}
+    idx = 2
+    
+    if len(meta["sites"]) > 1:
+        print(f"{idx}. Sites ({', '.join(meta['sites'])})")
+        menu[str(idx)] = ("sites", meta["sites"])
+        idx += 1
+    
+    if len(meta["elements"]) > 1:
+        print(f"{idx}. Elements ({', '.join(meta['elements'])})")
+        menu[str(idx)] = ("elements", meta["elements"])
+        idx += 1
+
+    if len(meta["orbitals"]) > 1:
+        print(f"{idx}. Orbitals ({', '.join(meta['orbitals'])})")
+        menu[str(idx)] = ("orbitals", meta["orbitals"])
+        idx += 1
+        
+    if len(meta["spins"]) > 1:
+        print(f"{idx}. Spins ({', '.join(meta['spins'])})")
+        menu[str(idx)] = ("spins", meta["spins"])
+        idx += 1
+
+    choice = input("\nSelect number: ").strip()
+    selection = menu.get(choice, "total")
+
+    if selection != "total":
+        mode, items = selection
+        print(f"\nCalculating {mode} resolved DOS...")
+        
+        # This function loops through ['A1', 'A2'...] and sums the columns for each
+        df_groups = compute_group_dos(df_raw, items)
+        
+        # Add new columns to the plotting dataframe
+        df_plot = pd.concat([df_plot, df_groups], axis=1)
+        title = f"{mode.capitalize()}-Resolved DOS"
+    
+    return df_plot
+
+def plot_dos(df, title="DOS Plot", filename="plot.png"):
+    x_col = "E"
+    y_cols = [c for c in df.columns if c != x_col]
+    
+    fig, ax = plt.subplots(figsize=(6, 5), dpi=150)
+    
+    for i, col in enumerate(y_cols):
+        # Special style for Total DOS
+        if "Total" in col:
+            ax.plot(df[x_col], df[col], color='k', linewidth=1.5, label=col, zorder=10)
+            ax.fill_between(df[x_col], df[col], color='k', alpha=0.05)
+        else:
+            c = COLORS[i % len(COLORS)]
+            ax.plot(df[x_col], df[col], color=c, linewidth=1.2, label=col)
+
+    # Labels and Limits
+    ax.set_xlabel(r"$E-E_\text{F}$ (eV)", fontsize=LABEL_FONT_SIZE)
+    ax.set_ylabel(r"Density of States (st./eV/at.)", fontsize=LABEL_FONT_SIZE)
+    ax.set_title(title, fontsize=TITLE_FONT_SIZE)
+    ax.set_xlim(XLIM)
+    #ax.set_ylim(YLIM)
+    
+    # Reference lines
+    ax.axvline(0, color='gray', linestyle=':', linewidth=1) 
+    ax.axhline(0, color='gray', linewidth=0.5) 
+
+    # Legend
+    ax.legend(fontsize=9, frameon=False, loc='upper right')
+    
+    plt.tight_layout()
+    print("Showing plot...")
+    plt.show()
 
 def main()->None:
     #SPRKKR_DOS_parser.py
@@ -426,12 +738,18 @@ def main()->None:
     data = data_parser(data_raw,NE,IT, NLQ)
     data, EFERMI, opt_unit, opt_conc = unit_fixes(data, EFERMI, CONC, TXT_T, HEADER, IT)
     data_tot, HEADER_tot = data_processor(data, TXT_T, IQ, IQAT, NLQ, HEADER, CONC, EFERMI)
-    save_parsed(data,filepath,HEADER, opt_conc,opt_unit)
-    save_tot(data_tot,filepath,HEADER_tot, opt_conc,opt_unit)
+    fname_bands = save_parsed(data,filepath,HEADER, opt_conc,opt_unit)
+    fname_tot = save_tot(data_tot,filepath,HEADER_tot, opt_conc,opt_unit)
     
     #SPRKKR_DOS_export.py
+    data, summed_dos, desired_energy, combine_sites, combine_elements, combine_orbitals, combine_spin, include_all_energies = sort_dos_data_from_file(fname_bands,default=DEFAULT_COMB)
+    fname_comb=build_datastruct(data, summed_dos, desired_energy, fname_bands, combine_sites, combine_elements, combine_orbitals, combine_spin, include_all_energies)
 
-
+    #SPRKKR_DOS_plotter.py
+    df_raw=convert_to_pandas(fname_comb, default=DEFAULT_COMB)
+    meta = analyze_headers(df_raw.columns)
+    df_plot=process_pandas(df_raw, meta)
+    plot_dos(df_plot)
 
 if __name__=="__main__":
     main()
